@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "app_state_machine.c"
+        "hx711.c"
+        "inputs.c"
+        "leds.c"
+        "storage_nvs.c"
+        "valves.c"
+    INCLUDE_DIRS
+        "../include"
+)
