@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "app_state_machine.c"
+        "bluetooth_serial.c"
         "hx711.c"
         "inputs.c"
         "leds.c"

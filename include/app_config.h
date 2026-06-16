@@ -40,8 +40,8 @@
  *
  * Faca a tara e a calibracao com pesos conhecidos antes de usar em campo.
  */
-#define APP_HX711_B1_OFFSET -1164539 
-#define APP_HX711_B2_OFFSET -1616536
+#define APP_HX711_B1_OFFSET -74889
+#define APP_HX711_B2_OFFSET -1891839
 #define APP_HX711_B1_SCALE  -15800.0f
 #define APP_HX711_B2_SCALE  -22400.0f
 
@@ -62,6 +62,17 @@
  * Exemplo: para um peso de 10 kg, use 10.0f.
  */
 #define APP_CALIBRATION_KNOWN_WEIGHT_KG 0.0f
+
+/* Bluetooth Classic SPP: aparece no computador como uma porta serial Bluetooth.
+ * Use para receber as leituras de calibracao sem cabo USB.
+ */
+#define APP_BLUETOOTH_SERIAL_ENABLED 1
+#define APP_BLUETOOTH_DEVICE_NAME    "GLP-Wemos-D32"
+#define APP_BLUETOOTH_SERVICE_NAME   "GLP-Calibracao"
+#define APP_BLUETOOTH_TX_QUEUE_LEN   16
+#define APP_BLUETOOTH_TX_LINE_MAX    160
+#define APP_BLUETOOTH_TX_TASK_STACK  4096
+#define APP_BLUETOOTH_TX_TASK_PRIO   4
 
 /* Limiar em kg abaixo do qual o botijao e considerado vazio. */
 #define APP_LIMIAR_VAZIO_KG 1.0f

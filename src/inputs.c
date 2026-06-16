@@ -15,6 +15,9 @@ typedef struct {
     TickType_t changed_at;
 } debounce_input_t;
 
+/* Fila compartilhada com a maquina de estados.
+ * A task de entradas nunca decide valvulas; ela so informa mudancas estaveis.
+ */
 static QueueHandle_t s_event_queue;
 
 static bool read_manual_gpio(gpio_num_t gpio)
@@ -26,6 +29,9 @@ static bool debounce_update(debounce_input_t *input, TickType_t now)
 {
     const bool raw = read_manual_gpio(input->gpio);
 
+    /* Quando o nivel muda, reinicia a janela de debounce. A mudanca so vira
+     * evento se permanecer igual por APP_INPUT_DEBOUNCE_MS.
+     */
     if (raw != input->raw_level) {
         input->raw_level = raw;
         input->changed_at = now;
@@ -43,6 +49,9 @@ static bool debounce_update(debounce_input_t *input, TickType_t now)
 
 static void send_manual_event(bool manual_b1, bool manual_b2)
 {
+    /* Evento consumido pela state_task. Modo manual tem prioridade absoluta,
+     * entao qualquer mudanca nos fins de curso precisa chegar rapidamente.
+     */
     app_event_t event = {
         .type = APP_EVENT_MANUAL_ATUALIZADO,
         .data.manual = {
@@ -60,6 +69,11 @@ static void inputs_task(void *arg)
 {
     (void)arg;
 
+    /* Task periodica de entradas digitais.
+     * - Le os dois fins de curso.
+     * - Aplica debounce por software.
+     * - Envia evento somente quando o estado estavel muda.
+     */
     debounce_input_t b1 = {
         .gpio = APP_INPUT_FIM_CURSO_B1_GPIO,
         .raw_level = read_manual_gpio(APP_INPUT_FIM_CURSO_B1_GPIO),
@@ -97,6 +111,9 @@ esp_err_t inputs_start(QueueHandle_t event_queue)
 {
     s_event_queue = event_queue;
 
+    /* Fins de curso em modo entrada. O pull interno e escolhido conforme
+     * APP_INPUT_ACTIVE_LEVEL para suportar chave para GND ou para VCC.
+     */
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << APP_INPUT_FIM_CURSO_B1_GPIO) | (1ULL << APP_INPUT_FIM_CURSO_B2_GPIO),
         .mode = GPIO_MODE_INPUT,
@@ -110,6 +127,7 @@ esp_err_t inputs_start(QueueHandle_t event_queue)
         return err;
     }
 
+    /* Cria a task FreeRTOS responsavel pelo debounce dos fins de curso. */
     BaseType_t ok = xTaskCreate(
         inputs_task,
         "inputs_task",

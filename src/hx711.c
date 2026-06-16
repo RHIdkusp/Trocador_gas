@@ -5,6 +5,7 @@
 
 #include "app_config.h"
 #include "app_types.h"
+#include "bluetooth_serial.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
@@ -30,6 +31,10 @@ typedef struct {
     int64_t sum;
 } moving_average_t;
 
+/* Protecao simples contra leituras espurias.
+ * Se uma amostra salta muitos kg de uma vez, ela e ignorada. Se leituras
+ * parecidas persistirem por algumas amostras, o novo patamar e aceito.
+ */
 typedef struct {
     bool has_last;
     int32_t last_accepted_raw;
@@ -38,6 +43,10 @@ typedef struct {
 } raw_guard_t;
 
 static QueueHandle_t s_event_queue;
+
+/* O protocolo do HX711 usa pulsos no SCK gerados por software. O mux evita que
+ * outra interrupcao/task atrapalhe a sequencia critica de 24 bits.
+ */
 static portMUX_TYPE s_hx711_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static esp_err_t hx711_gpio_init(const hx711_dev_t *dev)
@@ -96,6 +105,9 @@ static esp_err_t hx711_read_raw(const hx711_dev_t *dev, int32_t *raw)
 
     uint32_t value = 0;
 
+    /* Leitura bit-bang de 24 bits. A ordem dos pulsos segue o datasheet do
+     * HX711: DOUT fica pronto em nivel baixo; cada pulso de SCK desloca um bit.
+     */
     portENTER_CRITICAL(&s_hx711_mux);
     for (int i = 0; i < 24; ++i) {
         gpio_set_level(dev->sck_gpio, 1);
@@ -153,6 +165,9 @@ static bool moving_average_get(const moving_average_t *filter, int32_t *average)
 static bool moving_average_get_for_output(const moving_average_t *filter, int32_t *average)
 {
 #if APP_HX711_REQUIRE_FULL_FILTER
+    /* Durante a partida, espera preencher a media movel para nao publicar peso
+     * baseado em poucas amostras.
+     */
     if (filter->count < APP_HX711_MOVING_AVG_SAMPLES) {
         return false;
     }
@@ -167,6 +182,10 @@ static float raw_to_kg(const hx711_dev_t *dev, int32_t raw)
         return 0.0f;
     }
 
+    /* Conversao de calibracao:
+     * peso_kg = (media_bruta - offset) / scale
+     * Se o peso diminui quando coloca carga, use scale negativo.
+     */
     return ((float)(raw - dev->offset)) / dev->scale;
 }
 
@@ -262,6 +281,9 @@ static bool auto_tare_if_needed(hx711_dev_t *b1_dev,
                                 bool *tare_done)
 {
 #if APP_CALIBRATION_AUTO_TARE_ON_STARTUP
+    /* Modo de bancada: com as plataformas vazias ao ligar, usa a media inicial
+     * como offset/tara. Em operacao real deve ficar desativado.
+     */
     if (*tare_done) {
         return true;
     }
@@ -308,21 +330,31 @@ static void log_calibration_values(const hx711_dev_t *b1_dev,
                                    const app_pesos_t *pesos)
 {
 #if APP_CALIBRATION_LOG_RAW
-    ESP_LOGI(TAG, "RAW media: B1=%ld offset=%ld -> %.2fkg | B2=%ld offset=%ld -> %.2fkg",
+    /* Saida de calibracao. A mesma linha vai para o monitor serial USB e para
+     * o Bluetooth SPP, permitindo calibrar sem cabo depois de parear.
+     */
+    char line[APP_BLUETOOTH_TX_LINE_MAX];
+    snprintf(line, sizeof(line),
+             "RAW media: B1=%ld offset=%ld -> %.2fkg | B2=%ld offset=%ld -> %.2fkg",
              (long)avg_b1,
              (long)b1_dev->offset,
              pesos->peso_b1_kg,
              (long)avg_b2,
              (long)b2_dev->offset,
              pesos->peso_b2_kg);
+    ESP_LOGI(TAG, "%s", line);
+    bluetooth_serial_printf("%s\r\n", line);
 
     if (APP_CALIBRATION_KNOWN_WEIGHT_KG > 0.0f) {
         const float scale_b1 = ((float)(avg_b1 - b1_dev->offset)) / APP_CALIBRATION_KNOWN_WEIGHT_KG;
         const float scale_b2 = ((float)(avg_b2 - b2_dev->offset)) / APP_CALIBRATION_KNOWN_WEIGHT_KG;
-        ESP_LOGI(TAG, "SCALE sugerido com %.2fkg: B1=%.2ff B2=%.2ff",
+        snprintf(line, sizeof(line),
+                 "SCALE sugerido com %.2fkg: B1=%.2ff B2=%.2ff",
                  APP_CALIBRATION_KNOWN_WEIGHT_KG,
                  scale_b1,
                  scale_b2);
+        ESP_LOGI(TAG, "%s", line);
+        bluetooth_serial_printf("%s\r\n", line);
     }
 #else
     (void)b1_dev;
@@ -338,6 +370,9 @@ static void send_weight_event(const hx711_dev_t *b1_dev,
                               const moving_average_t *b1_filter,
                               const moving_average_t *b2_filter)
 {
+    /* Converte a media bruta dos filtros em kg e publica um unico evento para
+     * a maquina de estados. Este modulo nao decide qual valvula abrir.
+     */
     int32_t avg_b1 = 0;
     int32_t avg_b2 = 0;
     const bool b1_valid = moving_average_get_for_output(b1_filter, &avg_b1);
@@ -369,6 +404,12 @@ static void hx711_task(void *arg)
 {
     (void)arg;
 
+    /* Task periodica dos sensores de peso.
+     * - Le B1 e B2.
+     * - Descarta amostras iniciais.
+     * - Aplica filtro de media movel e protecao contra saltos.
+     * - Gera APP_EVENT_PESOS_ATUALIZADOS para a state_task.
+     */
     hx711_dev_t b1_dev = {
         .dout_gpio = APP_HX711_B1_DOUT_GPIO,
         .sck_gpio = APP_HX711_B1_SCK_GPIO,
@@ -419,6 +460,9 @@ static void hx711_task(void *arg)
         }
 
         if (b1_ok && b2_ok && startup_discard_count < APP_HX711_STARTUP_DISCARD_SAMPLES) {
+            /* O HX711 pode iniciar com leituras deslocadas; essas primeiras
+             * amostras nao entram no filtro.
+             */
             startup_discard_count++;
             if (startup_discard_count == APP_HX711_STARTUP_DISCARD_SAMPLES) {
                 ESP_LOGI(TAG, "Amostras iniciais descartadas; iniciando media movel");
@@ -446,6 +490,7 @@ esp_err_t hx711_start(QueueHandle_t event_queue)
 {
     s_event_queue = event_queue;
 
+    /* Cria a task FreeRTOS que executa as leituras periodicas dos HX711. */
     BaseType_t ok = xTaskCreate(
         hx711_task,
         "hx711_task",
